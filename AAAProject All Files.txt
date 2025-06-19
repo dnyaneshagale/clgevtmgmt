@@ -1,0 +1,1456 @@
+package com.dnyanesh.collegeeventmgmt.controller;
+
+import com.dnyanesh.collegeeventmgmt.dto.UserDto;
+import com.dnyanesh.collegeeventmgmt.service.UserService;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+import java.util.UUID;
+
+@RestController
+@RequestMapping("/api/admin")
+@RequiredArgsConstructor
+@PreAuthorize("hasRole('ADMIN')")
+public class AdminController {
+
+    private final UserService userService;
+
+    @GetMapping("/hello")
+    public String sayHello() {
+        return "Hello Admin";
+    }
+
+    @GetMapping("/users")
+    public List<UserDto> getAllUsers() {
+        return userService.getAllUsers();
+    }
+
+    @GetMapping("/users/{id}")
+    public UserDto getUser(@PathVariable UUID id) {
+        return userService.getUserById(id);
+    }
+
+    @PutMapping("/users/{id}")
+    public UserDto updateUser(@PathVariable UUID id,@Valid @RequestBody UserDto userDto) {
+        return userService.updateUserById(id, userDto);
+    }
+
+    @DeleteMapping("/users/{id}")
+    public ResponseEntity<?> deleteUser(@PathVariable UUID id) {
+        userService.deleteUserById(id);
+        return ResponseEntity.ok().build();
+    }
+}
+package com.dnyanesh.collegeeventmgmt.controller;
+
+import com.dnyanesh.collegeeventmgmt.dto.EventDto;
+import com.dnyanesh.collegeeventmgmt.model.Event;
+import com.dnyanesh.collegeeventmgmt.model.EventRegistration;
+import com.dnyanesh.collegeeventmgmt.repository.EventRegistrationRepository;
+import com.dnyanesh.collegeeventmgmt.service.EventService;
+import jakarta.servlet.http.HttpServletResponse;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.*;
+
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.util.List;
+import java.util.stream.Collectors;
+
+@RestController
+@RequestMapping("/api/admin/events")
+@RequiredArgsConstructor
+@PreAuthorize("hasRole('ADMIN')")
+public class AdminEventController {
+
+    private final EventService eventService;
+    private final EventRegistrationRepository registrationRepository;
+
+    // Create Event
+    @PostMapping
+    public ResponseEntity<EventDto> createEvent(@RequestBody EventDto dto) {
+        return ResponseEntity.ok(eventService.createEvent(dto));
+    }
+
+    // List All Events
+    @GetMapping
+    public ResponseEntity<List<EventDto>> getAllEvents() {
+        return ResponseEntity.ok(eventService.getAllEvents());
+    }
+
+    // Get Event by ID
+    @GetMapping("/{id}")
+    public ResponseEntity<EventDto> getEvent(@PathVariable Long id) {
+        EventDto event = eventService.getEvent(id);
+        if (event == null) return ResponseEntity.notFound().build();
+        return ResponseEntity.ok(event);
+    }
+
+    // Update Event
+    @PutMapping("/{id}")
+    public ResponseEntity<EventDto> updateEvent(@PathVariable Long id, @RequestBody EventDto dto) {
+        return ResponseEntity.ok(eventService.updateEvent(id, dto));
+    }
+
+    // Delete Event
+    @DeleteMapping("/{id}")
+    public ResponseEntity<?> deleteEvent(@PathVariable Long id) {
+        eventService.deleteEvent(id);
+        return ResponseEntity.ok().build();
+    }
+
+    // View Registrations for an Event
+    @GetMapping("/{id}/registrations")
+    public ResponseEntity<List<String>> getRegistrations(@PathVariable Long id) {
+        Event event = eventService.getEventEntity(id);
+        if (event == null) return ResponseEntity.notFound().build();
+        List<String> participants = registrationRepository.findByEvent(event)
+                .stream()
+                .map(reg -> reg.getUser().getEmail()) // You can add more info if needed
+                .collect(Collectors.toList());
+        return ResponseEntity.ok(participants);
+    }
+
+    // Download Participants as CSV
+    @GetMapping("/{id}/participants/csv")
+    public void downloadParticipantsCsv(@PathVariable Long id, HttpServletResponse response) throws IOException {
+        Event event = eventService.getEventEntity(id);
+        if (event == null) {
+            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            return;
+        }
+        List<EventRegistration> registrations = registrationRepository.findByEvent(event);
+
+        response.setContentType("text/csv");
+        response.setHeader("Content-Disposition", "attachment; filename=participants.csv");
+        PrintWriter writer = response.getWriter();
+        writer.println("Name,Email,RegistrationDate");
+        for (EventRegistration reg : registrations) {
+            writer.printf("%s,%s,%s\n",
+                    reg.getUser().getFullName(),
+                    reg.getUser().getEmail(),
+                    reg.getRegistrationDate());
+        }
+        writer.flush();
+        writer.close();
+    }
+}
+package com.dnyanesh.collegeeventmgmt.controller;
+
+import com.dnyanesh.collegeeventmgmt.dto.*;
+import com.dnyanesh.collegeeventmgmt.model.User;
+import com.dnyanesh.collegeeventmgmt.repository.UserRepository;
+import com.dnyanesh.collegeeventmgmt.security.JwtUtil;
+import lombok.RequiredArgsConstructor;
+import org.springframework.security.authentication.*;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api/auth")
+@RequiredArgsConstructor
+public class AuthController {
+
+    private final UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
+    private final AuthenticationManager authenticationManager;
+    private final JwtUtil jwtUtil;
+
+    @PostMapping("/register")
+    public AuthResponse register(@RequestBody RegisterRequest request) {
+        if (userRepository.findByEmail(request.getEmail()).isPresent()) {
+            throw new RuntimeException("Email already exists");
+        }
+        User user = User.builder()
+                .fullName(request.getFullName())
+                .email(request.getEmail())
+                .password(passwordEncoder.encode(request.getPassword()))
+                .role(request.getRole())
+                .build();
+        userRepository.save(user);
+        String token = jwtUtil.generateToken(user.getEmail(), user.getRole().name());
+        return new AuthResponse(token);
+    }
+
+    @PostMapping("/login")
+    public AuthResponse login(@RequestBody LoginRequest request) {
+        Authentication auth = authenticationManager.authenticate(
+                new UsernamePasswordAuthenticationToken(request.getEmail(), request.getPassword())
+        );
+        User user = userRepository.findByEmail(request.getEmail())
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        String token = jwtUtil.generateToken(user.getEmail(), user.getRole().name());
+        return new AuthResponse(token);
+    }
+}
+package com.dnyanesh.collegeeventmgmt.dto;
+
+import lombok.AllArgsConstructor;
+import lombok.Data;
+
+@Data
+@AllArgsConstructor
+public class AuthResponse {
+    private String token;
+}
+package com.dnyanesh.collegeeventmgmt;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class CollegeEventMgmtApplication {
+
+	public static void main(String[] args) {
+		SpringApplication.run(CollegeEventMgmtApplication.class, args);
+	}
+}
+package com.dnyanesh.collegeeventmgmt.service;
+
+import com.dnyanesh.collegeeventmgmt.model.User;
+import com.dnyanesh.collegeeventmgmt.repository.UserRepository;
+import lombok.RequiredArgsConstructor;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.stereotype.Service;
+
+@Service
+@RequiredArgsConstructor
+public class CustomUserDetailsService implements UserDetailsService {
+
+    private final UserRepository userRepository;
+
+    @Override
+    public UserDetails loadUserByUsername(String email) throws UsernameNotFoundException {
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new UsernameNotFoundException("User not found"));
+        return org.springframework.security.core.userdetails.User.builder()
+                .username(user.getEmail())
+                .password(user.getPassword())
+                .roles(user.getRole().name())
+                .build();
+    }
+}
+package com.dnyanesh.collegeeventmgmt.model;
+
+import jakarta.persistence.*;
+import lombok.*;
+import java.time.LocalDateTime;
+import java.util.HashSet;
+import java.util.Set;
+
+@Entity
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class Event {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private String name;
+    private String description;
+    private LocalDateTime startTime;
+    private LocalDateTime endTime;
+    private String venue;
+    private int capacity;
+
+    @Builder.Default
+    private boolean approved = false;
+
+    private String organizer;
+
+    private String imagePath; // New image field
+
+    @OneToMany(mappedBy = "event", cascade = CascadeType.ALL, orphanRemoval = true)
+    @ToString.Exclude
+    @Builder.Default
+    private Set<EventRegistration> registrations = new HashSet<>();
+}
+package com.dnyanesh.collegeeventmgmt.controller;
+
+import com.dnyanesh.collegeeventmgmt.dto.EventDto;
+import com.dnyanesh.collegeeventmgmt.service.EventService;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.UrlResource;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/events")
+public class EventController {
+
+    private final EventService eventService;
+
+    public EventController(EventService eventService) {
+        this.eventService = eventService;
+    }
+
+    @GetMapping
+    public ResponseEntity<List<EventDto>> getAllEvents() {
+        return ResponseEntity.ok(eventService.getAllEvents());
+    }
+
+    @GetMapping("/approved")
+    public ResponseEntity<List<EventDto>> getApprovedEvents() {
+        return ResponseEntity.ok(eventService.getApprovedEvents());
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<EventDto> getEventById(@PathVariable Long id) {
+        EventDto event = eventService.getEvent(id);
+        if (event == null) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(event);
+    }
+
+    @PostMapping
+    public ResponseEntity<EventDto> createEvent(@RequestBody EventDto eventDto) {
+        return ResponseEntity.ok(eventService.createEvent(eventDto));
+    }
+
+    @PutMapping("/{id}")
+    public ResponseEntity<EventDto> updateEvent(@PathVariable Long id, @RequestBody EventDto eventDto) {
+        try {
+            EventDto updated = eventService.updateEvent(id, eventDto);
+            return ResponseEntity.ok(updated);
+        } catch (RuntimeException e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> deleteEvent(@PathVariable Long id) {
+        eventService.deleteEvent(id);
+        return ResponseEntity.noContent().build();
+    }
+
+    @PostMapping("/{eventId}/image")
+    @PreAuthorize("hasAnyRole('ADMIN','FACULTY','STUDENT')")
+    public ResponseEntity<?> uploadEventImage(
+            @PathVariable Long eventId,
+            @RequestParam("file") MultipartFile file) {
+        String imageUrl = eventService.saveEventImage(eventId, file);
+        return ResponseEntity.ok().body(java.util.Map.of("imageUrl", imageUrl));
+    }
+
+    @GetMapping("/image/{filename:.+}")
+    @PreAuthorize("hasAnyRole('ADMIN','FACULTY','STUDENT')")
+    public ResponseEntity<Resource> getEventImage(@PathVariable String filename) {
+        try {
+            Path filePath = Paths.get("uploads/event-images/").resolve(filename).normalize();
+            Resource resource = new UrlResource(filePath.toUri());
+            if (!resource.exists()) {
+                return ResponseEntity.notFound().build();
+            }
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + resource.getFilename() + "\"")
+                    .body(resource);
+        } catch (Exception e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    // Approve event (admin/faculty only)
+    @PutMapping("/{id}/approve")
+    @PreAuthorize("hasAnyRole('ADMIN','FACULTY')")
+    public ResponseEntity<EventDto> approveEvent(@PathVariable Long id) {
+        try {
+            EventDto approved = eventService.approveEvent(id);
+            return ResponseEntity.ok(approved);
+        } catch (RuntimeException e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    // Reject event (admin/faculty only)
+    @PutMapping("/{id}/reject")
+    @PreAuthorize("hasAnyRole('ADMIN','FACULTY')")
+    public ResponseEntity<EventDto> rejectEvent(@PathVariable Long id) {
+        try {
+            EventDto rejected = eventService.rejectEvent(id);
+            return ResponseEntity.ok(rejected);
+        } catch (RuntimeException e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+}
+package com.dnyanesh.collegeeventmgmt.dto;
+
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import java.time.LocalDateTime;
+
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class EventDto {
+    private Long id;
+    private String name;
+    private String description;
+    private LocalDateTime startTime;
+    private LocalDateTime endTime;
+    private String venue;
+    private int capacity;
+    private boolean approved;
+    private String organizer;
+    private String imageUrl; // New field
+}
+package com.dnyanesh.collegeeventmgmt.controller;
+
+import com.dnyanesh.collegeeventmgmt.dto.EventDto;
+import com.dnyanesh.collegeeventmgmt.dto.EventRegistrationDto;
+import com.dnyanesh.collegeeventmgmt.service.EventParticipationService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+import java.util.Map;
+
+@RestController
+@RequestMapping("/api/participation/events")
+@RequiredArgsConstructor
+public class EventParticipationController {
+
+    private final EventParticipationService participationService;
+
+    // List events, with optional filter (?filter=upcoming/past)
+    @GetMapping
+    public ResponseEntity<List<EventDto>> listEvents(@RequestParam(required = false) String filter) {
+        return ResponseEntity.ok(participationService.listEvents(filter));
+    }
+
+    // Get event details
+    @GetMapping("/{eventId}")
+    public ResponseEntity<EventDto> getEvent(@PathVariable Long eventId) {
+        EventDto event = participationService.getEventDetails(eventId);
+        if (event == null) return ResponseEntity.notFound().build();
+        return ResponseEntity.ok(event);
+    }
+
+    // Register for event
+    @PostMapping("/{eventId}/register")
+    @PreAuthorize("hasAnyRole('STUDENT','FACULTY')")
+    public ResponseEntity<EventRegistrationDto> registerForEvent(
+            @PathVariable Long eventId,
+            @AuthenticationPrincipal UserDetails userDetails
+    ) {
+        return ResponseEntity.ok(
+                participationService.registerForEvent(eventId, userDetails.getUsername())
+        );
+    }
+
+    // Get registered events for current user
+    @GetMapping("/registered")
+    @PreAuthorize("hasAnyRole('STUDENT','FACULTY')")
+    public ResponseEntity<List<EventRegistrationDto>> getRegisteredEvents(
+            @AuthenticationPrincipal UserDetails userDetails
+    ) {
+        return ResponseEntity.ok(
+                participationService.getRegisteredEvents(userDetails.getUsername())
+        );
+    }
+
+    // Submit feedback for event
+    @PostMapping("/{eventId}/feedback")
+    @PreAuthorize("hasAnyRole('STUDENT','FACULTY')")
+    public ResponseEntity<EventRegistrationDto> submitFeedback(
+            @PathVariable Long eventId,
+            @RequestBody Map<String, String> payload,
+            @AuthenticationPrincipal UserDetails userDetails
+    ) {
+        String feedback = payload != null ? payload.get("feedback") : null;
+        return ResponseEntity.ok(
+                participationService.submitFeedback(eventId, userDetails.getUsername(), feedback)
+        );
+    }
+}
+package com.dnyanesh.collegeeventmgmt.service;
+
+import com.dnyanesh.collegeeventmgmt.dto.EventDto;
+import com.dnyanesh.collegeeventmgmt.dto.EventRegistrationDto;
+import com.dnyanesh.collegeeventmgmt.model.Event;
+import com.dnyanesh.collegeeventmgmt.model.EventRegistration;
+import com.dnyanesh.collegeeventmgmt.model.User;
+import com.dnyanesh.collegeeventmgmt.repository.EventRegistrationRepository;
+import com.dnyanesh.collegeeventmgmt.repository.EventRepository;
+import com.dnyanesh.collegeeventmgmt.repository.UserRepository;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Service
+@RequiredArgsConstructor
+public class EventParticipationService {
+
+    private final EventRepository eventRepository;
+    private final EventRegistrationRepository eventRegistrationRepository;
+    private final UserRepository userRepository;
+
+    // List all events (optionally filter for upcoming/past)
+    public List<EventDto> listEvents(String filter) {
+        // Defensive: Never allow null to propagate, avoids NPE in frameworks using hashCode
+        if (filter == null) filter = "";
+        LocalDateTime now = LocalDateTime.now();
+        List<Event> events = switch (filter) {
+            case "upcoming" -> eventRepository.findAll().stream()
+                    .filter(e -> e.getStartTime().isAfter(now))
+                    .collect(Collectors.toList());
+            case "past" -> eventRepository.findAll().stream()
+                    .filter(e -> e.getEndTime().isBefore(now))
+                    .collect(Collectors.toList());
+            default -> eventRepository.findAll();
+        };
+        return events.stream().map(this::toDto).collect(Collectors.toList());
+    }
+
+    // Get event details
+    public EventDto getEventDetails(Long eventId) {
+        return eventRepository.findById(eventId)
+                .map(this::toDto)
+                .orElse(null);
+    }
+
+    // Register current user for event
+    public EventRegistrationDto registerForEvent(Long eventId, String username) {
+        Event event = eventRepository.findById(eventId)
+                .orElseThrow(() -> new RuntimeException("Event not found"));
+        User user = userRepository.findByEmail(username)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        // Prevent duplicate registration
+        if (eventRegistrationRepository.findByEventAndUser(event, user).isPresent()) {
+            throw new RuntimeException("Already registered");
+        }
+        EventRegistration registration = EventRegistration.builder()
+                .event(event)
+                .user(user)
+                .registrationDate(LocalDateTime.now())
+                .build();
+        registration = eventRegistrationRepository.save(registration);
+        return toRegDto(registration);
+    }
+
+    // List registered events for user
+    public List<EventRegistrationDto> getRegisteredEvents(String username) {
+        User user = userRepository.findByEmail(username)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        return eventRegistrationRepository.findByUser(user)
+                .stream()
+                .map(this::toRegDto)
+                .collect(Collectors.toList());
+    }
+
+    // Submit feedback for an event
+    public EventRegistrationDto submitFeedback(Long eventId, String username, String feedback) {
+        Event event = eventRepository.findById(eventId)
+                .orElseThrow(() -> new RuntimeException("Event not found"));
+        User user = userRepository.findByEmail(username)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        EventRegistration reg = eventRegistrationRepository.findByEventAndUser(event, user)
+                .orElseThrow(() -> new RuntimeException("Not registered for this event"));
+        reg.setFeedback(feedback);
+        return toRegDto(eventRegistrationRepository.save(reg));
+    }
+
+    private EventDto toDto(Event event) {
+        return EventDto.builder()
+                .id(event.getId())
+                .name(event.getName())
+                .description(event.getDescription())
+                .startTime(event.getStartTime())
+                .endTime(event.getEndTime())
+                .venue(event.getVenue())
+                .capacity(event.getCapacity())
+                .organizer(event.getOrganizer())
+                .approved(event.isApproved())
+                .build();
+    }
+
+    private EventRegistrationDto toRegDto(EventRegistration reg) {
+        return EventRegistrationDto.builder()
+                .id(reg.getId())
+                .eventId(reg.getEvent().getId())
+                .eventName(reg.getEvent().getName())
+                .registrationDate(reg.getRegistrationDate())
+                .feedback(reg.getFeedback())
+                .attended(reg.isAttended())
+                .certificateIssued(reg.isCertificateIssued())
+                .build();
+    }
+}
+package com.dnyanesh.collegeeventmgmt.model;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+import java.time.LocalDateTime;
+
+@Entity
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class EventRegistration {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @ManyToOne
+    private Event event;
+
+    @ManyToOne
+    private User user;
+
+    @Builder.Default
+    private LocalDateTime registrationDate = LocalDateTime.now();
+
+    private String feedback;
+
+    private boolean attended;
+
+    private boolean certificateIssued;
+}
+package com.dnyanesh.collegeeventmgmt.dto;
+
+import lombok.*;
+
+import java.time.LocalDateTime;
+
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class EventRegistrationDto {
+    private Long id;
+    private Long eventId;
+    private String eventName;
+    private LocalDateTime registrationDate;
+    private String feedback;
+    private boolean attended;
+    private boolean certificateIssued;
+}
+package com.dnyanesh.collegeeventmgmt.repository;
+
+import com.dnyanesh.collegeeventmgmt.model.EventRegistration;
+import com.dnyanesh.collegeeventmgmt.model.Event;
+import com.dnyanesh.collegeeventmgmt.model.User;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.List;
+import java.util.Optional;
+
+public interface EventRegistrationRepository extends JpaRepository<EventRegistration, Long> {
+    List<EventRegistration> findByEvent(Event event);
+    List<EventRegistration> findByUser(User user);
+    Optional<EventRegistration> findByEventAndUser(Event event, User user);
+}
+package com.dnyanesh.collegeeventmgmt.repository;
+
+import com.dnyanesh.collegeeventmgmt.model.Event;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface EventRepository extends JpaRepository<Event, Long> {
+}
+package com.dnyanesh.collegeeventmgmt.service;
+
+import com.dnyanesh.collegeeventmgmt.dto.EventDto;
+import com.dnyanesh.collegeeventmgmt.model.Event;
+import com.dnyanesh.collegeeventmgmt.repository.EventRepository;
+import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
+
+import javax.imageio.ImageIO;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Service
+@RequiredArgsConstructor
+public class EventService {
+
+    private final EventRepository eventRepository;
+
+    @Value("${event.images.upload-dir:uploads/event-images/}")
+    private String uploadDir;
+
+    // Save event image with validation and delete old image if updating
+    public String saveEventImage(Long eventId, MultipartFile file) {
+        Event event = eventRepository.findById(eventId)
+                .orElseThrow(() -> new RuntimeException("Event not found"));
+
+        // 1. File size validation (max 5MB)
+        long maxSize = 5 * 1024 * 1024;
+        if (file.getSize() > maxSize) {
+            throw new RuntimeException("File size exceeds the maximum allowed: 5MB");
+        }
+
+        // 2. Extension validation
+        String originalFilename = file.getOriginalFilename();
+        if (originalFilename == null || !(originalFilename.toLowerCase().endsWith(".jpg")
+                || originalFilename.toLowerCase().endsWith(".jpeg")
+                || originalFilename.toLowerCase().endsWith(".png"))) {
+            throw new RuntimeException("Only JPG and PNG images are allowed.");
+        }
+
+        // 3. Content validation
+        try {
+            if (ImageIO.read(file.getInputStream()) == null) {
+                throw new RuntimeException("File is not a valid image.");
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("File is not a valid image.");
+        }
+
+        try {
+            Files.createDirectories(Paths.get(uploadDir));
+            String fileName = eventId + "_" + System.currentTimeMillis() + "_" + originalFilename;
+            Path filePath = Paths.get(uploadDir, fileName);
+            Files.copy(file.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
+
+            // Delete old image if updating
+            String oldImage = event.getImagePath();
+            if (oldImage != null && !oldImage.isEmpty()) {
+                Path oldPath = Paths.get(uploadDir, oldImage);
+                try { Files.deleteIfExists(oldPath); } catch (Exception ignored) {}
+            }
+
+            event.setImagePath(fileName);
+            eventRepository.save(event);
+            // Return API url for image
+            return "/api/events/image/" + fileName;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to upload image", e);
+        }
+    }
+
+    public EventDto createEvent(EventDto dto) {
+        // Always set approved to false when creating a new event (approval workflow)
+        Event event = Event.builder()
+                .name(dto.getName())
+                .description(dto.getDescription())
+                .startTime(dto.getStartTime())
+                .endTime(dto.getEndTime())
+                .venue(dto.getVenue())
+                .capacity(dto.getCapacity())
+                .organizer(dto.getOrganizer())
+                .approved(false) // new events are unapproved by default
+                .build();
+        event = eventRepository.save(event);
+        return toDto(event);
+    }
+
+    public List<EventDto> getAllEvents() {
+        return eventRepository.findAll().stream().map(this::toDto).collect(Collectors.toList());
+    }
+
+    public List<EventDto> getApprovedEvents() {
+        return eventRepository.findAll().stream()
+                .filter(Event::isApproved)
+                .map(this::toDto)
+                .collect(Collectors.toList());
+    }
+
+    public EventDto getEvent(Long id) {
+        return eventRepository.findById(id).map(this::toDto).orElse(null);
+    }
+
+    public EventDto updateEvent(Long id, EventDto dto) {
+        Event event = eventRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Event not found"));
+        event.setName(dto.getName());
+        event.setDescription(dto.getDescription());
+        event.setStartTime(dto.getStartTime());
+        event.setEndTime(dto.getEndTime());
+        event.setVenue(dto.getVenue());
+        event.setCapacity(dto.getCapacity());
+        event.setOrganizer(dto.getOrganizer());
+        // DO NOT allow normal update to approve event
+        // event.setApproved(dto.isApproved());
+        return toDto(eventRepository.save(event));
+    }
+
+    // Approve event (set approved = true)
+    public EventDto approveEvent(Long id) {
+        Event event = eventRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Event not found"));
+        event.setApproved(true);
+        return toDto(eventRepository.save(event));
+    }
+
+    // Reject event (set approved = false) -- you can customize to delete or add a rejected status if needed
+    public EventDto rejectEvent(Long id) {
+        Event event = eventRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Event not found"));
+        event.setApproved(false);
+        return toDto(eventRepository.save(event));
+    }
+
+    // Delete event and its image file if present
+    public void deleteEvent(Long id) {
+        Event event = eventRepository.findById(id).orElse(null);
+        if (event != null && event.getImagePath() != null) {
+            Path imagePath = Paths.get(uploadDir, event.getImagePath());
+            try { Files.deleteIfExists(imagePath); } catch (Exception ignored) {}
+        }
+        eventRepository.deleteById(id);
+    }
+
+    private EventDto toDto(Event event) {
+        return EventDto.builder()
+                .id(event.getId())
+                .name(event.getName())
+                .description(event.getDescription())
+                .startTime(event.getStartTime())
+                .endTime(event.getEndTime())
+                .venue(event.getVenue())
+                .capacity(event.getCapacity())
+                .organizer(event.getOrganizer())
+                .approved(event.isApproved())
+                .imageUrl(event.getImagePath() != null ? "/api/events/image/" + event.getImagePath() : null)
+                .build();
+    }
+
+    public Event getEventEntity(Long id) {
+        return eventRepository.findById(id).orElse(null);
+    }
+}
+package com.dnyanesh.collegeeventmgmt.controller;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/faculty")
+public class FacultyController {
+    @GetMapping("/hello")
+    public String facultyHello() {
+        return "Hello, Faculty!";
+    }
+}
+package com.dnyanesh.collegeeventmgmt.excetion;
+
+public class GlobalExceptionHandler {
+}
+package com.dnyanesh.collegeeventmgmt.security;
+
+import com.dnyanesh.collegeeventmgmt.service.CustomUserDetailsService;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import lombok.RequiredArgsConstructor;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import java.io.IOException;
+
+@Component
+@RequiredArgsConstructor
+public class JwtAuthenticationFilter extends OncePerRequestFilter {
+
+    private final JwtUtil jwtUtil;
+    private final CustomUserDetailsService userDetailsService;
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request,
+                                    HttpServletResponse response,
+                                    FilterChain filterChain)
+            throws ServletException, IOException {
+        final String authHeader = request.getHeader("Authorization");
+        String username = null;
+        String jwt = null;
+
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            jwt = authHeader.substring(7);
+            try {
+                username = jwtUtil.extractUsername(jwt);
+            } catch (Exception e) {
+                // Invalid JWT - ignore and continue as anonymous
+            }
+        }
+
+        if (username != null && SecurityContextHolder.getContext().getAuthentication() == null) {
+            UserDetails userDetails = this.userDetailsService.loadUserByUsername(username);
+            if (jwtUtil.validateToken(jwt, userDetails.getUsername())) {
+                UsernamePasswordAuthenticationToken authToken =
+                        new UsernamePasswordAuthenticationToken(
+                                userDetails, null, userDetails.getAuthorities());
+                authToken.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+                SecurityContextHolder.getContext().setAuthentication(authToken);
+            }
+        }
+        filterChain.doFilter(request, response);
+    }
+}
+package com.dnyanesh.collegeeventmgmt.security;
+
+import io.jsonwebtoken.*;
+import io.jsonwebtoken.security.Keys;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+import jakarta.annotation.PostConstruct;
+import javax.crypto.SecretKey;
+import java.util.Base64;
+import java.util.Date;
+import java.util.function.Function;
+
+@Component
+public class JwtUtil {
+
+    @Value("${jwt.secret}")
+    private String jwtSecret; // must be 64 bytes (base64-encoded) for HS512!
+
+    @Value("${jwt.expirationMs:86400000}") // 1 day default
+    private int jwtExpirationMs;
+
+    private SecretKey secretKey;
+
+    @PostConstruct
+    public void init() {
+        // Decode the Base64-encoded secret and create a key suitable for HS512
+        byte[] decodedKey = Base64.getDecoder().decode(jwtSecret);
+        this.secretKey = Keys.hmacShaKeyFor(decodedKey);
+    }
+
+    public String generateToken(String username, String role) {
+        return Jwts.builder()
+                .setSubject(username)
+                .claim("role", role)
+                .setIssuedAt(new Date())
+                .setExpiration(new Date(System.currentTimeMillis() + jwtExpirationMs))
+                .signWith(secretKey, SignatureAlgorithm.HS512)
+                .compact();
+    }
+
+    public String extractUsername(String token) {
+        return extractClaim(token, Claims::getSubject);
+    }
+
+    public String extractRole(String token) {
+        return extractAllClaims(token).get("role", String.class);
+    }
+
+    public <T> T extractClaim(String token, Function<Claims, T> claimsResolver) {
+        final Claims claims = extractAllClaims(token);
+        return claimsResolver.apply(claims);
+    }
+
+    private Claims extractAllClaims(String token) {
+        return Jwts.parserBuilder()
+                .setSigningKey(secretKey)
+                .build()
+                .parseClaimsJws(token)
+                .getBody();
+    }
+
+    public boolean validateToken(String token, String username) {
+        final String extractedUsername = extractUsername(token);
+        return (extractedUsername.equals(username) && !isTokenExpired(token));
+    }
+
+    private boolean isTokenExpired(String token) {
+        return extractExpiration(token).before(new Date());
+    }
+
+    private Date extractExpiration(String token) {
+        return extractClaim(token, Claims::getExpiration);
+    }
+}
+package com.dnyanesh.collegeeventmgmt.dto;
+
+import lombok.Data;
+
+@Data
+public class LoginRequest {
+    private String email;
+    private String password;
+}
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<parent>
+		<groupId>org.springframework.boot</groupId>
+		<artifactId>spring-boot-starter-parent</artifactId>
+		<version>3.4.6</version>
+		<relativePath/> <!-- lookup parent from repository -->
+	</parent>
+	<groupId>com.dnyanesh</groupId>
+	<artifactId>collegeeventmgmt</artifactId>
+	<version>0.0.1-SNAPSHOT</version>
+	<name>CollegeEventMgmt</name>
+	<description>Demo project for Spring Boot</description>
+	<url/>
+	<licenses>
+		<license/>
+	</licenses>
+	<developers>
+		<developer/>
+	</developers>
+	<scm>
+		<connection/>
+		<developerConnection/>
+		<tag/>
+		<url/>
+	</scm>
+	<properties>
+		<java.version>17</java.version>
+	</properties>
+	<dependencies>
+
+		<dependency>
+			<groupId>io.jsonwebtoken</groupId>
+			<artifactId>jjwt-api</artifactId>
+			<version>0.11.5</version>
+		</dependency>
+		<dependency>
+			<groupId>io.jsonwebtoken</groupId>
+			<artifactId>jjwt-impl</artifactId>
+			<version>0.11.5</version>
+			<scope>runtime</scope>
+		</dependency>
+		<dependency>
+			<groupId>io.jsonwebtoken</groupId>
+			<artifactId>jjwt-jackson</artifactId>
+			<version>0.11.5</version>
+			<scope>runtime</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-jpa</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-validation</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-web</artifactId>
+		</dependency>
+
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-devtools</artifactId>
+			<scope>runtime</scope>
+			<optional>true</optional>
+		</dependency>
+		<dependency>
+			<groupId>org.postgresql</groupId>
+			<artifactId>postgresql</artifactId>
+			<scope>runtime</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-configuration-processor</artifactId>
+			<optional>true</optional>
+		</dependency>
+		<dependency>
+			<groupId>org.projectlombok</groupId>
+			<artifactId>lombok</artifactId>
+			<optional>true</optional>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.security</groupId>
+			<artifactId>spring-security-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-compiler-plugin</artifactId>
+				<configuration>
+					<annotationProcessorPaths>
+						<path>
+							<groupId>org.projectlombok</groupId>
+							<artifactId>lombok</artifactId>
+						</path>
+						<path>
+							<groupId>org.springframework.boot</groupId>
+							<artifactId>spring-boot-configuration-processor</artifactId>
+						</path>
+					</annotationProcessorPaths>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>org.springframework.boot</groupId>
+				<artifactId>spring-boot-maven-plugin</artifactId>
+				<configuration>
+					<excludes>
+						<exclude>
+							<groupId>org.projectlombok</groupId>
+							<artifactId>lombok</artifactId>
+						</exclude>
+					</excludes>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
+
+</project>
+package com.dnyanesh.collegeeventmgmt.dto;
+
+import com.dnyanesh.collegeeventmgmt.model.Role;
+import lombok.Data;
+
+@Data
+public class RegisterRequest {
+    private String fullName;
+    private String email;
+    private String password;
+    private Role role;
+}
+package com.dnyanesh.collegeeventmgmt.excetion;
+
+public class ResourceNotFoundException {
+}
+package com.dnyanesh.collegeeventmgmt.model;
+
+public enum Role {
+    ADMIN,
+    FACULTY,
+    STUDENT
+}
+package com.dnyanesh.collegeeventmgmt.config;
+
+import com.dnyanesh.collegeeventmgmt.service.CustomUserDetailsService;
+import com.dnyanesh.collegeeventmgmt.security.JwtAuthenticationFilter;
+import lombok.RequiredArgsConstructor;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+
+@Configuration
+@RequiredArgsConstructor
+public class SecurityConfig {
+
+    private final CustomUserDetailsService userDetailsService;
+    private final JwtAuthenticationFilter jwtAuthenticationFilter;
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+                .csrf(csrf -> csrf.disable())
+                .sessionManagement(sess -> sess.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .authorizeHttpRequests(authz -> authz
+                        .requestMatchers("/api/auth/**").permitAll()
+                        .requestMatchers("/api/admin/**").hasRole("ADMIN")
+                        .requestMatchers("/api/faculty/**").hasAnyRole("FACULTY", "ADMIN")
+                        .requestMatchers("/api/student/**").hasAnyRole("STUDENT", "FACULTY", "ADMIN")
+                        .anyRequest().authenticated()
+                )
+                .userDetailsService(userDetailsService)
+                .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
+        return http.build();
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public AuthenticationManager authenticationManager(AuthenticationConfiguration config) throws Exception {
+        return config.getAuthenticationManager();
+    }
+}
+package com.dnyanesh.collegeeventmgmt.controller;
+
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/student")
+public class StudentController {
+    @GetMapping("/hello")
+    public String studentHello() {
+        return "Hello, Student!";
+    }
+}
+package com.dnyanesh.collegeeventmgmt.model;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+import java.util.UUID;
+
+@Entity
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+@Table(name = "users")
+public class User {
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private UUID id;
+
+    @Column(nullable = false)
+    private String fullName;
+
+    @Column(nullable = false, unique = true)
+    private String email;
+
+    @Column(nullable = false)
+    private String password;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private Role role;
+}
+package com.dnyanesh.collegeeventmgmt.controller;
+
+import com.dnyanesh.collegeeventmgmt.dto.UserDto;
+import com.dnyanesh.collegeeventmgmt.service.UserService;
+import jakarta.validation.Valid;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.Map;
+
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+
+    private final UserService userService;
+    public UserController(UserService userService) {
+        this.userService = userService;
+    }
+
+    // Get current user profile
+    @GetMapping("/me")
+    public ResponseEntity<UserDto> getCurrentUser(@AuthenticationPrincipal UserDetails userDetails) {
+        return ResponseEntity.ok(userService.getCurrentUser(userDetails.getUsername()));
+    }
+
+    // Update current user profile (fullName only)
+    @PutMapping("/me")
+    public ResponseEntity<UserDto> updateCurrentUser(
+            @AuthenticationPrincipal UserDetails userDetails,
+            @Valid @RequestBody UserDto userDto) {
+        return ResponseEntity.ok(userService.updateCurrentUser(userDetails.getUsername(), userDto));
+    }
+
+    // Update email (with password confirmation)
+    @PutMapping("/me/email")
+    public ResponseEntity<UserDto> updateEmail(
+            @AuthenticationPrincipal UserDetails userDetails,
+            @RequestBody Map<String, String> request) {
+        String newEmail = request.get("email");
+        String password = request.get("password"); // Optional, but recommended
+        return ResponseEntity.ok(userService.updateEmail(userDetails.getUsername(), newEmail, password));
+    }
+
+    // Update password
+    @PutMapping("/me/password")
+    public ResponseEntity<?> updatePassword(
+            @AuthenticationPrincipal UserDetails userDetails,
+            @RequestBody Map<String, String> request) {
+        String currentPassword = request.get("currentPassword");
+        String newPassword = request.get("newPassword");
+        userService.updatePassword(userDetails.getUsername(), currentPassword, newPassword);
+        return ResponseEntity.ok().body(Map.of("message", "Password updated successfully"));
+    }
+}
+package com.dnyanesh.collegeeventmgmt.dto;
+
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
+import lombok.*;
+
+import java.util.UUID;
+
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class UserDto {
+    private UUID id;
+
+    @NotBlank(message = "Full name is required")
+    private String fullName;
+
+    @Email(message = "Email should be valid")
+    @NotBlank(message = "Email is required")
+    private String email;
+
+    @NotBlank(message = "Role is required")
+    private String role;
+}
+package com.dnyanesh.collegeeventmgmt.repository;
+
+import com.dnyanesh.collegeeventmgmt.model.User;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.Optional;
+import java.util.UUID;
+
+public interface UserRepository extends JpaRepository<User, UUID> {
+    Optional<User> findByEmail(String email);
+}
+package com.dnyanesh.collegeeventmgmt.service;
+
+import com.dnyanesh.collegeeventmgmt.dto.UserDto;
+import com.dnyanesh.collegeeventmgmt.model.User;
+import com.dnyanesh.collegeeventmgmt.model.Role;
+import com.dnyanesh.collegeeventmgmt.repository.UserRepository;
+import lombok.RequiredArgsConstructor;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+import java.util.UUID;
+
+@Service
+@RequiredArgsConstructor
+public class UserService {
+
+    private final UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
+
+    public UserDto getCurrentUser(String email) {
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        return toDto(user);
+    }
+
+    public UserDto updateCurrentUser(String email, UserDto userDto) {
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        user.setFullName(userDto.getFullName());
+        // Do NOT update email here!
+        return toDto(userRepository.save(user));
+    }
+
+    public UserDto updateEmail(String currentEmail, String newEmail, String password) {
+        User user = userRepository.findByEmail(currentEmail)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        // Optional: Check password for confirmation
+        if (password != null && !passwordEncoder.matches(password, user.getPassword())) {
+            throw new RuntimeException("Password incorrect");
+        }
+
+        // Check for duplicate email
+        if (userRepository.findByEmail(newEmail).isPresent() && !currentEmail.equalsIgnoreCase(newEmail)) {
+            throw new RuntimeException("Email already in use");
+        }
+
+        user.setEmail(newEmail);
+        return toDto(userRepository.save(user));
+    }
+
+    public void updatePassword(String email, String currentPassword, String newPassword) {
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        if (!passwordEncoder.matches(currentPassword, user.getPassword())) {
+            throw new RuntimeException("Current password is incorrect");
+        }
+        user.setPassword(passwordEncoder.encode(newPassword));
+        userRepository.save(user);
+    }
+
+    private UserDto toDto(User user) {
+        return UserDto.builder()
+                .id(user.getId())
+                .fullName(user.getFullName())
+                .email(user.getEmail())
+                .role(user.getRole().name())
+                .build();
+    }
+
+    // ADMIN: Get all users
+    public List<UserDto> getAllUsers() {
+        return userRepository.findAll()
+                .stream()
+                .map(this::toDto)
+                .toList();
+    }
+
+    // ADMIN: Get user by ID
+    public UserDto getUserById(UUID id) {
+        User user = userRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        return toDto(user);
+    }
+
+    // ADMIN: Update user by ID (can update full name, email, role)
+    public UserDto updateUserById(UUID id, UserDto userDto) {
+        User user = userRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        user.setFullName(userDto.getFullName());
+        user.setEmail(userDto.getEmail());
+        user.setRole(Role.valueOf(userDto.getRole()));
+        return toDto(userRepository.save(user));
+    }
+
+    // ADMIN: Delete user by ID
+    public void deleteUserById(UUID id) {
+        if (!userRepository.existsById(id)) {
+            throw new RuntimeException("User not found");
+        }
+        userRepository.deleteById(id);
+    }
+}
